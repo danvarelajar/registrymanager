@@ -6,4 +6,5 @@ dist/
 *.tar
 .app.pid
 .app.log
-data/
+data/*
+!data/.gitkeep
