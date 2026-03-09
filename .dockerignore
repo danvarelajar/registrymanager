@@ -1,0 +1,8 @@
+node_modules
+.git
+.env
+.app.pid
+.app.log
+*.log
+frontend/dist
+images/*.tar

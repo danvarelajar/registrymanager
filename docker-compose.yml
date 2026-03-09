@@ -1,0 +1,13 @@
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3001"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./images:/app/images
+      - ./data:/app/data
+    environment:
+      - WATCH_FOLDER=/app/images
+      - PORT=3001
+    restart: unless-stopped
