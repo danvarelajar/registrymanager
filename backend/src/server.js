@@ -12,11 +12,57 @@ import * as db from './db.js';
 import { WATCH_FOLDER, PORT } from './config.js';
 
 const app = express();
+
+// Trust proxy for correct client IP behind Docker/nginx (X-Forwarded-For)
+app.set('trust proxy', 1);
+
 app.use(cors());
 app.use(express.json());
 
+// HTTP request logging: source IP, headers, response code (filtered)
+const LOG_HEADERS = ['user-agent', 'host', 'referer', 'accept', 'content-type'];
+const SKIP_EXT = /\.(js|css|map|ico|png|svg|woff2?|ttf|eot|webp)(\?|$)/i;
+const SKIP_PATHS = ['/favicon.ico'];
+
+app.use((req, res, next) => {
+  if (SKIP_PATHS.includes(req.path) || SKIP_EXT.test(req.path)) return next();
+
+  const start = Date.now();
+  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
+  const headers = {};
+  for (const k of LOG_HEADERS) {
+    if (req.headers[k]) headers[k] = req.headers[k];
+  }
+
+  res.on('finish', () => {
+    const durationMs = Date.now() - start;
+    const responseHeaders = {};
+    for (const [k, v] of Object.entries(res.getHeaders())) {
+      responseHeaders[k] = Array.isArray(v) ? v.join(', ') : String(v);
+    }
+    try {
+      db.insertHttpLog(ip, req.method, req.path, res.statusCode, durationMs, headers, responseHeaders);
+    } catch (err) {
+      console.error('Failed to store http log:', err.message);
+    }
+  });
+  next();
+});
+
 // In-memory state for push progress (single-worker)
 let pushState = { status: 'idle', current: null, queue: [], progress: null };
+
+// --- HTTP logs ---
+app.get('/api/logs', (req, res) => {
+  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
+  const offset = parseInt(req.query.offset, 10) || 0;
+  res.json(db.getHttpLogs(limit, offset));
+});
+
+app.delete('/api/logs', (req, res) => {
+  db.deleteAllHttpLogs();
+  res.json({ deleted: true });
+});
 
 // --- Config ---
 app.get('/api/config', (req, res) => {
@@ -88,6 +134,13 @@ app.get('/api/scan', async (req, res) => {
     }
     const cached = db.getScanCache();
     if (cached.lastScannedAt && cached.files.length >= 0) {
+      const hasMissingCachedPath = cached.files.some(
+        (file) => file?.filePath && !existsSync(file.filePath)
+      );
+      if (hasMissingCachedPath) {
+        const result = await scanFolder();
+        return res.json(result);
+      }
       return res.json({
         files: cached.files,
         lastScannedAt: cached.lastScannedAt,
