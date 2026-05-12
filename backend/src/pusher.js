@@ -61,7 +61,7 @@ export async function pushTar(filePath, registryKeys, onProgress) {
     const pct = 20 + (pushed + 0.5) * progressPerTarget;
     emit('pushing', pct, `Pushing to ${name}...`, { target });
 
-    const pushStream = await docker.getImage(target).push();
+    const pushStream = await docker.getImage(target).push({ authconfig: {} });
     await new Promise((resolve, reject) => {
       docker.modem.followProgress(pushStream, (err) => (err ? reject(err) : resolve()));
     });
