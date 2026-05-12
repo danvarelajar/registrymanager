@@ -10,4 +10,6 @@ services:
     environment:
       - WATCH_FOLDER=/app/images
       - PORT=3001
+      # Set to 1 to allow self-signed TLS certs on registries (e.g. "fetch failed")
+      - REGISTRY_INSECURE_TLS=1
     restart: unless-stopped

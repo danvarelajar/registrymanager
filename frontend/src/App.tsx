@@ -2,10 +2,11 @@ import { useState, useEffect } from 'react';
 import { FolderView } from './components/FolderView';
 import { RegistryBrowser } from './components/RegistryBrowser';
 import { RegistrySettings } from './components/RegistrySettings';
+import { LogsView } from './components/LogsView';
 import { PushProgress } from './components/PushProgress';
 import { getPushStatus, type PushStatus } from './api';
 
-type Tab = 'folder' | 'registry' | 'settings';
+type Tab = 'folder' | 'registry' | 'settings' | 'logs';
 
 function basename(path: string): string {
   const parts = path.split(/[/\\]/);
@@ -68,6 +69,9 @@ export default function App() {
                 <TabButton active={tab === 'settings'} onClick={() => setTab('settings')}>
                   Settings
                 </TabButton>
+                <TabButton active={tab === 'logs'} onClick={() => setTab('logs')}>
+                  Logs
+                </TabButton>
               </nav>
             </div>
             {showIndicator && (
@@ -104,6 +108,7 @@ export default function App() {
         {tab === 'folder' && <FolderView onPushStart={handlePushStart} />}
         {tab === 'registry' && <RegistryBrowser />}
         {tab === 'settings' && <RegistrySettings />}
+        {tab === 'logs' && <LogsView />}
       </main>
 
       {showProgress && (

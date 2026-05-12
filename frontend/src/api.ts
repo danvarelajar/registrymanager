@@ -187,6 +187,29 @@ export async function getTags(
   return data.tags || [];
 }
 
+export type HttpLog = {
+  id: number;
+  ip: string;
+  method: string;
+  path: string;
+  status: number;
+  durationMs: number;
+  headers: Record<string, string>;
+  responseHeaders: Record<string, string>;
+  createdAt: string;
+};
+
+export async function getHttpLogs(limit = 100, offset = 0): Promise<HttpLog[]> {
+  const res = await fetch(`${API}/logs?limit=${limit}&offset=${offset}`);
+  if (!res.ok) throw new Error('Failed to load logs');
+  return res.json();
+}
+
+export async function deleteHttpLogs(): Promise<void> {
+  const res = await fetch(`${API}/logs`, { method: 'DELETE' });
+  if (!res.ok) throw new Error('Failed to delete logs');
+}
+
 export async function deleteTag(
   registryKey: string,
   repo: string,
