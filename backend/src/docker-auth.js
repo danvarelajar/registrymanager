@@ -41,8 +41,9 @@ function repositoryPrefix(registry) {
 /**
  * Where an image is pushed.
  * Regular registries use hostname:port/<component>:<tag>. An optional repository is a path prefix.
- * OCIR is <tenancy-namespace>/<repository>/<component>:<tag>, for example
- * fortinetoraclecloud1/fortiaigate/webui:V8.0.2-build0046.
+ * An OCIR repository name is a single path, such as fortiaigate. The image name stays in the tag:
+ * fortinetoraclecloud1/fortiaigate:webui-V8.0.2-build0046.
+ * fortiaigate/webui is a different OCIR repository.
  */
 export function imageDestination(registry, component, tag, auth) {
   const prefix = repositoryPrefix(registry);
@@ -56,8 +57,11 @@ export function imageDestination(registry, component, tag, auth) {
         'Username must be <tenancy-namespace>/<user>, and the password is an auth token.'
     );
   }
-  const imageName = prefix ? `${prefix}/${component}` : component;
-  return { repository: `${ns}/${imageName}`.toLowerCase(), tag };
+  if (!prefix) return { repository: `${ns}/${String(component).toLowerCase()}`, tag };
+  return {
+    repository: `${ns}/${prefix}`.toLowerCase(),
+    tag: `${String(component).toLowerCase()}-${tag}`,
+  };
 }
 
 export function dockerConfigPath() {
