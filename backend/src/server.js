@@ -98,7 +98,7 @@ app.post('/api/registries', (req, res) => {
   }
   const repository = normalizeRepository(req.body.repository);
   if (repository == null) {
-    return res.status(400).json({ error: 'Repository must be a lowercase path such as fortiaigate' });
+    return res.status(400).json({ error: 'Repository must be a lowercase path' });
   }
   try {
     const r = db.addRegistry(String(name).trim(), String(hostname).trim(), p, repository);
@@ -123,7 +123,7 @@ app.put('/api/registries/:id', (req, res) => {
   }
   const repository = normalizeRepository(req.body.repository);
   if (repository == null) {
-    return res.status(400).json({ error: 'Repository must be a lowercase path such as fortiaigate' });
+    return res.status(400).json({ error: 'Repository must be a lowercase path' });
   }
   try {
     const r = db.updateRegistry(id, String(name).trim(), String(hostname).trim(), p, repository);

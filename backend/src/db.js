@@ -61,9 +61,6 @@ function migrate() {
   }
   try {
     db.exec(`ALTER TABLE registries ADD COLUMN repository TEXT NOT NULL DEFAULT ''`);
-    db.prepare(
-      `UPDATE registries SET repository = 'fortiaigate' WHERE lower(hostname) LIKE '%.ocir.io' AND repository = ''`
-    ).run();
   } catch {
     /* column exists */
   }

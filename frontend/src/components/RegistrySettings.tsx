@@ -59,7 +59,7 @@ export function RegistrySettings() {
     <div className="space-y-6">
       <h2 className="text-lg font-semibold text-white">Registry settings</h2>
       <p className="text-sm text-surface-400">
-        Add or edit Docker registries by hostname and port. A push uses your existing docker login for that host when one exists. For Oracle Cloud, Repository is the OCIR repository name, such as fortiaigate. Each image is a tag on that repository, for example fortiaigate:webui-V8.0.2-build0046. Leave Repository empty for a registry that should keep using the image name only.
+        Add or edit Docker registries by hostname and port. A push uses your existing docker login for that host when one exists. For Oracle Cloud, leave Repository empty. Each image name is the repository, for example fra.ocir.io/tenancy-namespace/webui:V8.0.2-build0046.
       </p>
 
       {error && (
@@ -191,9 +191,8 @@ function RegistryForm({
           onChange={(e) => {
             const value = e.target.value;
             setHostname(value);
-            if (value.toLowerCase().endsWith('.ocir.io')) {
-              if (port === '5000' || port === '') setPort('443');
-              if (!repository.trim()) setRepository('fortiaigate');
+            if (value.toLowerCase().endsWith('.ocir.io') && (port === '5000' || port === '')) {
+              setPort('443');
             }
           }}
           placeholder="registry.example.com"
@@ -207,7 +206,7 @@ function RegistryForm({
           type="text"
           value={repository}
           onChange={(e) => setRepository(e.target.value)}
-          placeholder="fortiaigate"
+          placeholder="optional path prefix"
           className="w-full rounded border border-surface-700 bg-surface-800 px-3 py-2 font-mono text-surface-200"
         />
       </div>
