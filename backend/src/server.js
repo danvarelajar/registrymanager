@@ -9,6 +9,7 @@ import { scanFolder, getLastScannedAt } from './scanner.js';
 import { pushTar } from './pusher.js';
 import * as registry from './registry.js';
 import * as db from './db.js';
+import { imageDestination, isOcirHost, resolveDockerAuth } from './docker-auth.js';
 import { WATCH_FOLDER, PORT } from './config.js';
 
 const app = express();
@@ -77,6 +78,15 @@ app.get('/api/registries', (req, res) => {
   res.json(db.getAllRegistries());
 });
 
+function normalizeRepository(value) {
+  const repo = String(value || '').trim().toLowerCase().replace(/^\/+|\/+$/g, '');
+  if (!repo) return '';
+  if (!/^[a-z0-9._-]+(?:\/[a-z0-9._-]+)*$/.test(repo)) {
+    return null;
+  }
+  return repo;
+}
+
 app.post('/api/registries', (req, res) => {
   const { name, hostname, port } = req.body;
   if (!name || !hostname || port == null) {
@@ -86,8 +96,12 @@ app.post('/api/registries', (req, res) => {
   if (isNaN(p) || p < 1 || p > 65535) {
     return res.status(400).json({ error: 'port must be 1-65535' });
   }
+  const repository = normalizeRepository(req.body.repository);
+  if (repository == null) {
+    return res.status(400).json({ error: 'Repository must be a lowercase path such as fortiaigate' });
+  }
   try {
-    const r = db.addRegistry(String(name).trim(), String(hostname).trim(), p);
+    const r = db.addRegistry(String(name).trim(), String(hostname).trim(), p, repository);
     res.status(201).json(r);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -107,8 +121,12 @@ app.put('/api/registries/:id', (req, res) => {
   if (!db.getRegistryById(id)) {
     return res.status(404).json({ error: 'Registry not found' });
   }
+  const repository = normalizeRepository(req.body.repository);
+  if (repository == null) {
+    return res.status(400).json({ error: 'Repository must be a lowercase path such as fortiaigate' });
+  }
   try {
-    const r = db.updateRegistry(id, String(name).trim(), String(hostname).trim(), p);
+    const r = db.updateRegistry(id, String(name).trim(), String(hostname).trim(), p, repository);
     res.json(r);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -268,10 +286,17 @@ app.post('/api/registry/check', async (req, res) => {
         await Promise.all(
           registries.map(async (r) => {
             try {
-              const tags = await registry.getTags(r.id, component);
-              presence[r.id] = tags && tags.includes(tag);
-            } catch {
+              const auth = await resolveDockerAuth(r.hostname, r.port);
+              const dest = imageDestination(r, component, tag, auth);
+              const tags = await registry.getTags(r.id, dest.repository);
+              presence[r.id] = tags && tags.includes(dest.tag);
+            } catch (err) {
               presence[r.id] = false;
+              const missing = /Tags list failed: 404/.test(err.message || '')
+                || (isOcirHost(r.hostname) && /Tags list failed: 403/.test(err.message || ''));
+              if (!missing) {
+                console.warn(`Presence check failed for ${r.hostname}/${component}: ${err.message}`);
+              }
             }
           })
         );
@@ -294,6 +319,17 @@ app.get('/api/registry/:key/catalog', async (req, res) => {
   }
 });
 
+app.get('/api/registry/:key/tags', async (req, res) => {
+  const repo = req.query.repository;
+  if (!repo) return res.status(400).json({ error: 'repository required' });
+  try {
+    const tags = await registry.getTags(req.params.key, repo);
+    res.json({ tags });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/api/registry/:key/repositories/:repo/tags', async (req, res) => {
   try {
     const tags = await registry.getTags(req.params.key, req.params.repo);
@@ -303,10 +339,26 @@ app.get('/api/registry/:key/repositories/:repo/tags', async (req, res) => {
   }
 });
 
+async function deleteTag(registryKey, repo, tag) {
+  const digest = await registry.getManifestDigest(registryKey, repo, tag);
+  await registry.deleteManifest(registryKey, repo, digest);
+}
+
+app.delete('/api/registry/:key/manifests', async (req, res) => {
+  const repo = req.query.repository;
+  const tag = req.query.tag;
+  if (!repo || !tag) return res.status(400).json({ error: 'repository and tag required' });
+  try {
+    await deleteTag(req.params.key, repo, tag);
+    res.json({ deleted: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.delete('/api/registry/:key/manifests/:repo/:tag', async (req, res) => {
   try {
-    const digest = await registry.getManifestDigest(req.params.key, req.params.repo, req.params.tag);
-    await registry.deleteManifest(req.params.key, req.params.repo, digest);
+    await deleteTag(req.params.key, req.params.repo, req.params.tag);
     res.json({ deleted: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

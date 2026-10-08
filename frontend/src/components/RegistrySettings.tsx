@@ -31,10 +31,10 @@ export function RegistrySettings() {
     }
   };
 
-  const handleAdd = async (name: string, hostname: string, port: number) => {
+  const handleAdd = async (name: string, hostname: string, port: number, repository: string) => {
     setError(null);
     try {
-      const r = await addRegistry(name, hostname, port);
+      const r = await addRegistry(name, hostname, port, repository);
       setRegistries((prev) => [...prev, r]);
       setAdding(false);
     } catch (e) {
@@ -43,10 +43,10 @@ export function RegistrySettings() {
     }
   };
 
-  const handleUpdate = async (id: string, name: string, hostname: string, port: number) => {
+  const handleUpdate = async (id: string, name: string, hostname: string, port: number, repository: string) => {
     setError(null);
     try {
-      const r = await updateRegistry(id, name, hostname, port);
+      const r = await updateRegistry(id, name, hostname, port, repository);
       setRegistries((prev) => prev.map((x) => (x.id === id ? r : x)));
       setEditing(null);
     } catch (e) {
@@ -59,7 +59,7 @@ export function RegistrySettings() {
     <div className="space-y-6">
       <h2 className="text-lg font-semibold text-white">Registry settings</h2>
       <p className="text-sm text-surface-400">
-        Add or edit Docker registries by hostname and port. These are used for pushing images and browsing.
+        Add or edit Docker registries by hostname and port. A push uses your existing docker login for that host when one exists. For Oracle Cloud, Repository is the OCIR repository name, such as fortiaigate. Each image is stored as a tag on that repository, for example fortiaigate:api-V8.0.2-build0046. Leave Repository empty for a registry that should keep using the image name only.
       </p>
 
       {error && (
@@ -80,7 +80,8 @@ export function RegistrySettings() {
                     name={r.name}
                     hostname={r.hostname}
                     port={r.port}
-                    onSave={(name, hostname, port) => handleUpdate(r.id, name, hostname, port)}
+                    repository={r.repository}
+                    onSave={(name, hostname, port, repository) => handleUpdate(r.id, name, hostname, port, repository)}
                     onCancel={() => setEditing(null)}
                   />
                 ) : (
@@ -89,6 +90,7 @@ export function RegistrySettings() {
                       <span className="font-medium text-surface-200">{r.name}</span>
                       <span className="ml-2 font-mono text-sm text-surface-500">
                         {r.hostname}:{r.port}
+                        {r.repository ? `/${r.repository}` : ''}
                       </span>
                     </div>
                     <div className="flex gap-2">
@@ -137,18 +139,21 @@ function RegistryForm({
   name: initialName = '',
   hostname: initialHostname = '',
   port: initialPort = 5000,
+  repository: initialRepository = '',
   onSave,
   onCancel,
 }: {
   name?: string;
   hostname?: string;
   port?: number;
-  onSave: (name: string, hostname: string, port: number) => Promise<void>;
+  repository?: string;
+  onSave: (name: string, hostname: string, port: number, repository: string) => Promise<void>;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(initialName);
   const [hostname, setHostname] = useState(initialHostname);
   const [port, setPort] = useState(String(initialPort));
+  const [repository, setRepository] = useState(initialRepository);
   const [saving, setSaving] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -159,7 +164,7 @@ function RegistryForm({
     }
     setSaving(true);
     try {
-      await onSave(name.trim(), hostname.trim(), p);
+      await onSave(name.trim(), hostname.trim(), p, repository.trim());
     } finally {
       setSaving(false);
     }
@@ -183,10 +188,27 @@ function RegistryForm({
         <input
           type="text"
           value={hostname}
-          onChange={(e) => setHostname(e.target.value)}
+          onChange={(e) => {
+            const value = e.target.value;
+            setHostname(value);
+            if (value.toLowerCase().endsWith('.ocir.io')) {
+              if (port === '5000' || port === '') setPort('443');
+              if (!repository.trim()) setRepository('fortiaigate');
+            }
+          }}
           placeholder="registry.example.com"
           className="w-full rounded border border-surface-700 bg-surface-800 px-3 py-2 font-mono text-surface-200"
           required
+        />
+      </div>
+      <div>
+        <label className="mb-1 block text-xs text-surface-500">Repository</label>
+        <input
+          type="text"
+          value={repository}
+          onChange={(e) => setRepository(e.target.value)}
+          placeholder="fortiaigate"
+          className="w-full rounded border border-surface-700 bg-surface-800 px-3 py-2 font-mono text-surface-200"
         />
       </div>
       <div>

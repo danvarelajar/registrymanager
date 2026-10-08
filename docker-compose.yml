@@ -7,9 +7,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./images:/app/images
       - ./data:/app/data
+      - ${HOME}/.docker:/docker-config:ro
     environment:
       - WATCH_FOLDER=/app/images
       - PORT=3001
       # Set to 1 to allow self-signed TLS certs on registries (e.g. "fetch failed")
       - REGISTRY_INSECURE_TLS=1
+      # Host docker login, mounted below. Used for OCIR and any registry that already has a login.
+      - DOCKER_CONFIG=/docker-config
     restart: unless-stopped

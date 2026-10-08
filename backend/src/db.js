@@ -59,52 +59,59 @@ function migrate() {
   } catch {
     /* column exists */
   }
+  try {
+    db.exec(`ALTER TABLE registries ADD COLUMN repository TEXT NOT NULL DEFAULT ''`);
+    db.prepare(
+      `UPDATE registries SET repository = 'fortiaigate' WHERE lower(hostname) LIKE '%.ocir.io' AND repository = ''`
+    ).run();
+  } catch {
+    /* column exists */
+  }
 }
 
-export function getAllRegistries() {
-  const d = init();
-  const rows = d.prepare('SELECT id, name, hostname, port FROM registries ORDER BY name').all();
-  return rows.map((r) => ({
-    key: r.id,
-    id: r.id,
-    name: r.name,
-    hostname: r.hostname,
-    port: r.port,
-    url: `https://${r.hostname}:${r.port}`,
-  }));
-}
-
-export function getRegistryById(id) {
-  const d = init();
-  const r = d.prepare('SELECT id, name, hostname, port FROM registries WHERE id = ?').get(id);
-  if (!r) return null;
+function mapRegistry(r) {
   return {
     key: r.id,
     id: r.id,
     name: r.name,
     hostname: r.hostname,
     port: r.port,
+    repository: r.repository || '',
     url: `https://${r.hostname}:${r.port}`,
   };
 }
 
-export function addRegistry(name, hostname, port) {
+export function getAllRegistries() {
+  const d = init();
+  const rows = d.prepare('SELECT id, name, hostname, port, repository FROM registries ORDER BY name').all();
+  return rows.map(mapRegistry);
+}
+
+export function getRegistryById(id) {
+  const d = init();
+  const r = d.prepare('SELECT id, name, hostname, port, repository FROM registries WHERE id = ?').get(id);
+  if (!r) return null;
+  return mapRegistry(r);
+}
+
+export function addRegistry(name, hostname, port, repository = '') {
   const d = init();
   const id = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  d.prepare('INSERT INTO registries (id, name, hostname, port) VALUES (?, ?, ?, ?)').run(
+  d.prepare('INSERT INTO registries (id, name, hostname, port, repository) VALUES (?, ?, ?, ?, ?)').run(
     id,
     name,
     hostname,
-    port
+    port,
+    repository || ''
   );
   return getRegistryById(id);
 }
 
-export function updateRegistry(id, name, hostname, port) {
+export function updateRegistry(id, name, hostname, port, repository = '') {
   const d = init();
   d.prepare(
-    'UPDATE registries SET name = ?, hostname = ?, port = ? WHERE id = ?'
-  ).run(name, hostname, port, id);
+    'UPDATE registries SET name = ?, hostname = ?, port = ?, repository = ? WHERE id = ?'
+  ).run(name, hostname, port, repository || '', id);
   return getRegistryById(id);
 }
 

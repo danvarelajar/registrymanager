@@ -16,6 +16,7 @@ export type Registry = {
   name: string;
   hostname: string;
   port: number;
+  repository: string;
   url: string;
 };
 
@@ -64,11 +65,11 @@ export async function getRegistries(): Promise<Registry[]> {
   return res.json();
 }
 
-export async function addRegistry(name: string, hostname: string, port: number): Promise<Registry> {
+export async function addRegistry(name: string, hostname: string, port: number, repository = ''): Promise<Registry> {
   const res = await fetch(`${API}/registries`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, hostname, port }),
+    body: JSON.stringify({ name, hostname, port, repository }),
   });
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
@@ -81,12 +82,13 @@ export async function updateRegistry(
   id: string,
   name: string,
   hostname: string,
-  port: number
+  port: number,
+  repository = ''
 ): Promise<Registry> {
   const res = await fetch(`${API}/registries/${encodeURIComponent(id)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, hostname, port }),
+    body: JSON.stringify({ name, hostname, port, repository }),
   });
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
@@ -166,11 +168,21 @@ export async function checkRegistryPresence(
   return res.json();
 }
 
+async function errorFromResponse(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json();
+    if (body?.error) return body.error;
+  } catch {
+    /* response was not JSON */
+  }
+  return fallback;
+}
+
 export async function getCatalog(registryKey: string): Promise<string[]> {
   const res = await fetch(
     `${API}/registry/${encodeURIComponent(registryKey)}/catalog`
   );
-  if (!res.ok) throw new Error('Failed to load catalog');
+  if (!res.ok) throw new Error(await errorFromResponse(res, 'Failed to load catalog'));
   const data = await res.json();
   return data.repositories || [];
 }
@@ -179,10 +191,11 @@ export async function getTags(
   registryKey: string,
   repo: string
 ): Promise<string[]> {
+  const params = new URLSearchParams({ repository: repo });
   const res = await fetch(
-    `${API}/registry/${encodeURIComponent(registryKey)}/repositories/${encodeURIComponent(repo)}/tags`
+    `${API}/registry/${encodeURIComponent(registryKey)}/tags?${params}`
   );
-  if (!res.ok) throw new Error('Failed to load tags');
+  if (!res.ok) throw new Error(await errorFromResponse(res, 'Failed to load tags'));
   const data = await res.json();
   return data.tags || [];
 }
@@ -215,8 +228,9 @@ export async function deleteTag(
   repo: string,
   tag: string
 ): Promise<void> {
+  const params = new URLSearchParams({ repository: repo, tag });
   const res = await fetch(
-    `${API}/registry/${encodeURIComponent(registryKey)}/manifests/${encodeURIComponent(repo)}/${encodeURIComponent(tag)}`,
+    `${API}/registry/${encodeURIComponent(registryKey)}/manifests?${params}`,
     { method: 'DELETE' }
   );
   if (!res.ok) {

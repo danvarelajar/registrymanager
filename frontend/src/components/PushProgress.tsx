@@ -44,9 +44,11 @@ export function PushProgress({
         )}
         {p && (
           <div className="mt-4">
-            <div className="mb-2 flex justify-between text-sm">
-              <span className="text-surface-400">{p.message}</span>
-              <span className="font-mono text-surface-500">{formatElapsed(p.elapsed)}</span>
+            <div className="mb-2 flex justify-between gap-3 text-sm">
+              <span className="text-surface-400">{isError ? 'Failed' : p.message}</span>
+              {formatElapsed(p.elapsed) && (
+                <span className="shrink-0 font-mono text-surface-500">{formatElapsed(p.elapsed)}</span>
+              )}
             </div>
             <div className="h-2 overflow-hidden rounded-full bg-surface-800">
               <div
@@ -105,7 +107,8 @@ export function PushProgress({
   );
 }
 
-function formatElapsed(ms: number): string {
+function formatElapsed(ms: number | undefined): string {
+  if (ms == null || !Number.isFinite(ms)) return '';
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
   if (m > 0) return `${m}m ${s % 60}s`;
