@@ -59,7 +59,7 @@ export function RegistrySettings() {
     <div className="space-y-6">
       <h2 className="text-lg font-semibold text-white">Registry settings</h2>
       <p className="text-sm text-surface-400">
-        Add or edit Docker registries by hostname and port. A push uses your existing docker login for that host when one exists. For Oracle Cloud, Repository is the OCIR repository name, such as fortiaigate. Each image is stored as a tag on that repository, for example fortiaigate:api-V8.0.2-build0046. Leave Repository empty for a registry that should keep using the image name only.
+        Add or edit Docker registries by hostname and port. A push uses your existing docker login for that host when one exists. For Oracle Cloud, Repository is the path before the image name, such as fortiaigate. Images are pushed as fortiaigate/webui:V8.0.2-build0046. Leave Repository empty for a registry that should keep using the image name only.
       </p>
 
       {error && (
