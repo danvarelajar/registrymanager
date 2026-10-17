@@ -44,6 +44,8 @@ export function parseWwwAuthenticate(header) {
   return { scheme, ...params };
 }
 
+const REQUEST_TIMEOUT_MS = Number(process.env.REGISTRY_REQUEST_TIMEOUT_MS) || 10000;
+
 function rawFetch(url, options = {}) {
   const u = new URL(url);
   const lib = u.protocol === 'http:' ? http : https;
@@ -53,6 +55,7 @@ function rawFetch(url, options = {}) {
     path: u.pathname + u.search,
     method: options.method || 'GET',
     headers: { ...REGISTRY_HEADERS, ...options.headers },
+    timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
     ...(lib === https ? httpsOpts : {}),
   };
   return new Promise((resolve, reject) => {
@@ -69,6 +72,10 @@ function rawFetch(url, options = {}) {
           json: async () => JSON.parse(body || '{}'),
         });
       });
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      reject(Object.assign(new Error(`connect ETIMEDOUT ${opts.hostname}:${opts.port}`), { code: 'ETIMEDOUT' }));
     });
     req.on('error', reject);
     req.end();

@@ -1,4 +1,5 @@
-import { type PushStatus } from '../api';
+import { useEffect, useState } from 'react';
+import { cancelPush, type PushStatus } from '../api';
 
 function basename(path: string): string {
   const parts = path.split(/[/\\]/);
@@ -16,33 +17,59 @@ export function PushProgress({
 }) {
   const p = status?.progress;
   const isError = p?.stage === 'error';
+  const isCancelled = p?.stage === 'cancelled';
+  const isCancelling = p?.stage === 'cancelling';
   const queueTotal = p?.queueTotal ?? 1;
   const queueIndex = p?.queueIndex ?? 0;
   const isQueue = queueTotal > 1;
   const isPushing = status?.status === 'pushing';
+  const [cancelling, setCancelling] = useState(false);
+  const [cancelError, setCancelError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!isPushing) setCancelling(false);
+  }, [isPushing]);
 
   // Overall progress: for queue, blend queue position with per-image progress
   const overallProgress = isQueue
     ? (queueIndex / queueTotal) * 100 + (p?.progress ?? 0) / queueTotal
     : (p?.progress ?? 0);
 
+  const title = isError
+    ? 'Push failed'
+    : isCancelled
+      ? 'Push cancelled'
+      : isCancelling || cancelling
+        ? 'Cancelling push'
+        : 'Pushing image' + (isQueue ? 's' : '');
+
+  const handleCancel = async () => {
+    if (!isPushing || cancelling || isCancelling) return;
+    setCancelError(null);
+    setCancelling(true);
+    try {
+      await cancelPush();
+    } catch (e) {
+      setCancelError(e instanceof Error ? e.message : 'Cancel failed');
+      setCancelling(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-surface-950/80 backdrop-blur-sm">
       <div className="w-full max-w-lg rounded-2xl border border-surface-800 bg-surface-900 p-6 shadow-2xl">
-        <h3 className="text-lg font-semibold text-white">
-          {isError ? 'Push failed' : 'Pushing image' + (isQueue ? 's' : '')}
-        </h3>
-        {isQueue && (
+        <h3 className="text-lg font-semibold text-white">{title}</h3>
+        {isQueue && !isCancelled && (
           <p className="mt-1 text-sm text-surface-400">
             Image {queueIndex + 1} of {queueTotal}
           </p>
         )}
-        {status?.current && (
+        {status?.current && isPushing && (
           <p className="mt-1 truncate font-mono text-sm text-surface-500" title={status.current}>
             {basename(status.current)}
           </p>
         )}
-        {p && (
+        {p && !isCancelled && (
           <div className="mt-4">
             <div className="mb-2 flex justify-between gap-3 text-sm">
               <span className="text-surface-400">{isError ? 'Failed' : p.message}</span>
@@ -52,13 +79,15 @@ export function PushProgress({
             </div>
             <div className="h-2 overflow-hidden rounded-full bg-surface-800">
               <div
-                className="h-full bg-accent-500 transition-all duration-300"
+                className={`h-full transition-all duration-300 ${
+                  isCancelling || cancelling ? 'bg-amber-500' : 'bg-accent-500'
+                }`}
                 style={{ width: `${overallProgress}%` }}
               />
             </div>
           </div>
         )}
-        {isQueue && status?.queue && status.queue.length > 0 && (
+        {isQueue && status?.queue && status.queue.length > 0 && isPushing && (
           <div className="mt-4 max-h-32 overflow-y-auto rounded-lg border border-surface-800 bg-surface-950 p-2">
             <p className="mb-2 text-xs font-medium uppercase tracking-wider text-surface-500">
               Queue
@@ -86,21 +115,38 @@ export function PushProgress({
           </div>
         )}
         {isError && <p className="mt-3 text-sm text-red-400">{p?.message}</p>}
+        {isCancelled && (
+          <p className="mt-3 text-sm text-amber-300">
+            Push stopped. Images already uploaded stay in the registry; local Docker images were cleaned up.
+          </p>
+        )}
+        {cancelError && <p className="mt-3 text-sm text-red-400">{cancelError}</p>}
         <div className="mt-6 flex justify-end gap-2">
           {isPushing && (
+            <>
+              <button
+                onClick={handleCancel}
+                disabled={cancelling || isCancelling}
+                className="rounded-lg border border-red-500/40 bg-red-500/10 px-4 py-2 text-sm font-medium text-red-300 hover:bg-red-500/20 disabled:opacity-50"
+              >
+                {cancelling || isCancelling ? 'Cancelling…' : 'Cancel'}
+              </button>
+              <button
+                onClick={onMinimize}
+                className="rounded-lg bg-surface-700 px-4 py-2 text-sm font-medium text-surface-200 hover:bg-surface-600"
+              >
+                Minimize
+              </button>
+            </>
+          )}
+          {!isPushing && (
             <button
-              onClick={onMinimize}
-              className="rounded-lg bg-surface-700 px-4 py-2 text-sm font-medium text-surface-200 hover:bg-surface-600"
+              onClick={onClose}
+              className="rounded-lg bg-surface-800 px-4 py-2 text-sm font-medium text-surface-200 hover:bg-surface-700"
             >
-              Minimize
+              Close
             </button>
           )}
-          <button
-            onClick={onClose}
-            className="rounded-lg bg-surface-800 px-4 py-2 text-sm font-medium text-surface-200 hover:bg-surface-700"
-          >
-            Close
-          </button>
         </div>
       </div>
     </div>

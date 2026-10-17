@@ -6,7 +6,7 @@ import { existsSync } from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 import { scanFolder, getLastScannedAt } from './scanner.js';
-import { pushTar } from './pusher.js';
+import { pushTar, isCancelledError } from './pusher.js';
 import * as registry from './registry.js';
 import * as db from './db.js';
 import { imageDestination, isOcirHost, resolveDockerAuth } from './docker-auth.js';
@@ -20,50 +20,23 @@ app.set('trust proxy', 1);
 app.use(cors());
 app.use(express.json());
 
-// HTTP request logging: source IP, headers, response code (filtered)
-const LOG_HEADERS = ['user-agent', 'host', 'referer', 'accept', 'content-type'];
-const SKIP_EXT = /\.(js|css|map|ico|png|svg|woff2?|ttf|eot|webp)(\?|$)/i;
-const SKIP_PATHS = ['/favicon.ico'];
-
-app.use((req, res, next) => {
-  if (SKIP_PATHS.includes(req.path) || SKIP_EXT.test(req.path)) return next();
-
-  const start = Date.now();
-  const ip = req.ip || req.socket?.remoteAddress || 'unknown';
-  const headers = {};
-  for (const k of LOG_HEADERS) {
-    if (req.headers[k]) headers[k] = req.headers[k];
-  }
-
-  res.on('finish', () => {
-    const durationMs = Date.now() - start;
-    const responseHeaders = {};
-    for (const [k, v] of Object.entries(res.getHeaders())) {
-      responseHeaders[k] = Array.isArray(v) ? v.join(', ') : String(v);
-    }
-    try {
-      db.insertHttpLog(ip, req.method, req.path, res.statusCode, durationMs, headers, responseHeaders);
-    } catch (err) {
-      console.error('Failed to store http log:', err.message);
-    }
-  });
-  next();
-});
-
 // In-memory state for push progress (single-worker)
 let pushState = { status: 'idle', current: null, queue: [], progress: null };
+let pushAbort = null;
 
-// --- HTTP logs ---
-app.get('/api/logs', (req, res) => {
-  const limit = Math.min(parseInt(req.query.limit, 10) || 100, 500);
-  const offset = parseInt(req.query.offset, 10) || 0;
-  res.json(db.getHttpLogs(limit, offset));
-});
+function beginPush() {
+  pushAbort?.abort();
+  pushAbort = new AbortController();
+  return pushAbort.signal;
+}
 
-app.delete('/api/logs', (req, res) => {
-  db.deleteAllHttpLogs();
-  res.json({ deleted: true });
-});
+function endPush(progress = null) {
+  pushState.status = 'idle';
+  pushState.current = null;
+  pushState.queue = [];
+  pushState.progress = progress;
+  pushAbort = null;
+}
 
 // --- Config ---
 app.get('/api/config', (req, res) => {
@@ -78,15 +51,6 @@ app.get('/api/registries', (req, res) => {
   res.json(db.getAllRegistries());
 });
 
-function normalizeRepository(value) {
-  const repo = String(value || '').trim().toLowerCase().replace(/^\/+|\/+$/g, '');
-  if (!repo) return '';
-  if (!/^[a-z0-9._-]+(?:\/[a-z0-9._-]+)*$/.test(repo)) {
-    return null;
-  }
-  return repo;
-}
-
 app.post('/api/registries', (req, res) => {
   const { name, hostname, port } = req.body;
   if (!name || !hostname || port == null) {
@@ -96,12 +60,8 @@ app.post('/api/registries', (req, res) => {
   if (isNaN(p) || p < 1 || p > 65535) {
     return res.status(400).json({ error: 'port must be 1-65535' });
   }
-  const repository = normalizeRepository(req.body.repository);
-  if (repository == null) {
-    return res.status(400).json({ error: 'Repository must be a lowercase path' });
-  }
   try {
-    const r = db.addRegistry(String(name).trim(), String(hostname).trim(), p, repository);
+    const r = db.addRegistry(String(name).trim(), String(hostname).trim(), p);
     res.status(201).json(r);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -121,12 +81,8 @@ app.put('/api/registries/:id', (req, res) => {
   if (!db.getRegistryById(id)) {
     return res.status(404).json({ error: 'Registry not found' });
   }
-  const repository = normalizeRepository(req.body.repository);
-  if (repository == null) {
-    return res.status(400).json({ error: 'Repository must be a lowercase path' });
-  }
   try {
-    const r = db.updateRegistry(id, String(name).trim(), String(hostname).trim(), p, repository);
+    const r = db.updateRegistry(id, String(name).trim(), String(hostname).trim(), p);
     res.json(r);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -196,8 +152,10 @@ app.post('/api/push', async (req, res) => {
     return res.status(409).json({ error: 'Push already in progress' });
   }
 
+  const signal = beginPush();
   pushState.status = 'pushing';
   pushState.current = filePath;
+  pushState.queue = [];
   pushState.progress = null;
 
   res.json({ accepted: true });
@@ -205,14 +163,14 @@ app.post('/api/push', async (req, res) => {
   try {
     await pushTar(filePath, registries, (p) => {
       pushState.progress = p;
-    });
-    pushState.status = 'idle';
-    pushState.current = null;
-    pushState.progress = null;
+    }, signal);
+    endPush(null);
   } catch (err) {
-    pushState.progress = { stage: 'error', message: err.message };
-    pushState.status = 'idle';
-    pushState.current = null;
+    if (isCancelledError(err)) {
+      endPush({ stage: 'cancelled', message: 'Push cancelled', progress: 0, elapsed: pushState.progress?.elapsed });
+    } else {
+      endPush({ stage: 'error', message: err.message });
+    }
   }
 });
 
@@ -226,34 +184,58 @@ app.post('/api/push/queue', async (req, res) => {
     return res.status(409).json({ error: 'Push already in progress' });
   }
 
+  const signal = beginPush();
   pushState.queue = items;
   pushState.status = 'pushing';
+  pushState.progress = null;
 
   res.json({ accepted: true });
 
   (async () => {
-    let lastError = null;
+    let outcome = null;
     for (let i = 0; i < items.length; i++) {
+      if (signal.aborted) {
+        outcome = { stage: 'cancelled', message: 'Push cancelled', queueIndex: i, queueTotal: items.length, progress: 0 };
+        break;
+      }
       const { filePath, registries } = items[i];
-      if (pushState.status !== 'pushing') break;
       pushState.current = filePath;
       try {
         await pushTar(filePath, registries, (p) => {
           pushState.progress = { ...p, queueIndex: i, queueTotal: items.length };
-        });
+        }, signal);
       } catch (err) {
-        lastError = err;
-        pushState.progress = { stage: 'error', message: err.message, queueIndex: i, queueTotal: items.length };
+        if (isCancelledError(err)) {
+          outcome = {
+            stage: 'cancelled',
+            message: 'Push cancelled',
+            queueIndex: i,
+            queueTotal: items.length,
+            progress: 0,
+            elapsed: pushState.progress?.elapsed,
+          };
+        } else {
+          outcome = { stage: 'error', message: err.message, queueIndex: i, queueTotal: items.length };
+        }
         break;
       }
     }
-    pushState.status = 'idle';
-    pushState.current = null;
-    if (!lastError) {
-      pushState.queue = [];
-      pushState.progress = null;
-    }
+    endPush(outcome);
   })();
+});
+
+app.post('/api/push/cancel', (req, res) => {
+  if (pushState.status !== 'pushing') {
+    return res.status(409).json({ error: 'No push in progress' });
+  }
+  pushState.queue = [];
+  pushState.progress = {
+    ...(pushState.progress || {}),
+    stage: 'cancelling',
+    message: 'Cancelling…',
+  };
+  pushAbort?.abort();
+  res.json({ accepted: true });
 });
 
 app.get('/api/push/status', (req, res) => {
@@ -265,6 +247,20 @@ app.get('/api/push/status', (req, res) => {
     queue: pushState.queue,
   });
 });
+
+async function mapLimit(items, limit, worker) {
+  const results = new Array(items.length);
+  let next = 0;
+  async function run() {
+    while (next < items.length) {
+      const i = next++;
+      results[i] = await worker(items[i], i);
+    }
+  }
+  const workers = Array.from({ length: Math.min(limit, items.length) || 0 }, () => run());
+  await Promise.all(workers);
+  return results;
+}
 
 // --- Registry check (batch presence) ---
 app.post('/api/registry/check', async (req, res) => {
@@ -278,31 +274,45 @@ app.post('/api/registry/check', async (req, res) => {
       ? registryIds.map((id) => db.getRegistryById(id)).filter(Boolean)
       : db.getAllRegistries();
 
+    const jobs = [];
+    for (const image of images) {
+      if (!image?.component || !image?.tag) continue;
+      for (const r of registries) {
+        jobs.push({ image, registry: r });
+      }
+    }
+
     const result = {};
-    await Promise.all(
-      images.map(async ({ component, tag }) => {
-        const fullRepoTag = `${component}:${tag}`;
-        const presence = {};
-        await Promise.all(
-          registries.map(async (r) => {
-            try {
-              const auth = await resolveDockerAuth(r.hostname, r.port);
-              const dest = imageDestination(r, component, tag, auth);
-              const tags = await registry.getTags(r.id, dest.repository);
-              presence[r.id] = tags && tags.includes(dest.tag);
-            } catch (err) {
-              presence[r.id] = false;
-              const missing = /Tags list failed: 404/.test(err.message || '')
-                || (isOcirHost(r.hostname) && /Tags list failed: 403/.test(err.message || ''));
-              if (!missing) {
-                console.warn(`Presence check failed for ${r.hostname}/${component}: ${err.message}`);
-              }
-            }
-          })
-        );
-        result[fullRepoTag] = presence;
-      })
-    );
+    for (const { component, tag } of images) {
+      if (!component || !tag) continue;
+      result[`${component}:${tag}`] = Object.fromEntries(registries.map((r) => [r.id, false]));
+    }
+
+    // Unbounded parallel checks open too many sockets and time out even when the
+    // registries are reachable. Keep a small pool so presence scans stay reliable.
+    const concurrency = Number(process.env.REGISTRY_CHECK_CONCURRENCY) || 4;
+    const tagCache = new Map();
+    await mapLimit(jobs, concurrency, async ({ image, registry: r }) => {
+      const fullRepoTag = `${image.component}:${image.tag}`;
+      try {
+        const auth = await resolveDockerAuth(r.hostname, r.port);
+        const dest = imageDestination(r, image.component, image.tag, auth);
+        const cacheKey = `${r.id}\n${dest.repository}`;
+        let tags = tagCache.get(cacheKey);
+        if (!tags) {
+          tags = await registry.getTags(r.id, dest.repository);
+          tagCache.set(cacheKey, tags);
+        }
+        result[fullRepoTag][r.id] = tags.includes(dest.tag);
+      } catch (err) {
+        result[fullRepoTag][r.id] = false;
+        const missing = /Tags list failed: 404/.test(err.message || '')
+          || (isOcirHost(r.hostname) && /Tags list failed: 403/.test(err.message || ''));
+        if (!missing) {
+          console.warn(`Presence check failed for ${r.hostname}/${image.component}: ${err.message}`);
+        }
+      }
+    });
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });

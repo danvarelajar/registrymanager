@@ -34,21 +34,14 @@ export function ocirNamespaceFromUsername(username) {
   return ns || null;
 }
 
-function repositoryPrefix(registry) {
-  return String(registry.repository || '').replace(/^\/+|\/+$/g, '');
-}
-
 /**
  * Where an image is pushed.
- * Regular registries use hostname:port/<component>:<tag>. An optional repository is a path prefix.
- * OCIR repository names are the image names. With no prefix the reference is
- * <tenancy-namespace>/<component>:<tag>, for example fortinetoraclecloud1/webui:V8.0.2-build0046.
+ * Regular registries use hostname:port/<component>:<tag>.
+ * OCIR uses <tenancy-namespace>/<component>:<tag>, for example fortinetoraclecloud1/webui:V8.0.2-build0046.
  */
 export function imageDestination(registry, component, tag, auth) {
-  const prefix = repositoryPrefix(registry);
-  const imageName = prefix ? `${prefix}/${component}` : component;
   if (!isOcirHost(registry.hostname)) {
-    return { repository: imageName, tag };
+    return { repository: component, tag };
   }
   const ns = ocirNamespaceFromUsername(auth?.username);
   if (!ns) {
@@ -57,7 +50,7 @@ export function imageDestination(registry, component, tag, auth) {
         'Username must be <tenancy-namespace>/<user>, and the password is an auth token.'
     );
   }
-  return { repository: `${ns}/${imageName}`.toLowerCase(), tag };
+  return { repository: `${ns}/${component}`.toLowerCase(), tag };
 }
 
 export function dockerConfigPath() {

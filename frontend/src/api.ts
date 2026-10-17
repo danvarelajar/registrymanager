@@ -16,7 +16,6 @@ export type Registry = {
   name: string;
   hostname: string;
   port: number;
-  repository: string;
   url: string;
 };
 
@@ -65,11 +64,11 @@ export async function getRegistries(): Promise<Registry[]> {
   return res.json();
 }
 
-export async function addRegistry(name: string, hostname: string, port: number, repository = ''): Promise<Registry> {
+export async function addRegistry(name: string, hostname: string, port: number): Promise<Registry> {
   const res = await fetch(`${API}/registries`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, hostname, port, repository }),
+    body: JSON.stringify({ name, hostname, port }),
   });
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
@@ -82,13 +81,12 @@ export async function updateRegistry(
   id: string,
   name: string,
   hostname: string,
-  port: number,
-  repository = ''
+  port: number
 ): Promise<Registry> {
   const res = await fetch(`${API}/registries/${encodeURIComponent(id)}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, hostname, port, repository }),
+    body: JSON.stringify({ name, hostname, port }),
   });
   if (!res.ok) {
     const e = await res.json().catch(() => ({}));
@@ -155,6 +153,14 @@ export async function getPushStatus(): Promise<PushStatus> {
   return res.json();
 }
 
+export async function cancelPush(): Promise<void> {
+  const res = await fetch(`${API}/push/cancel`, { method: 'POST' });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.error || 'Cancel failed');
+  }
+}
+
 export async function checkRegistryPresence(
   images: { component: string; tag: string }[],
   registryIds?: string[]
@@ -198,29 +204,6 @@ export async function getTags(
   if (!res.ok) throw new Error(await errorFromResponse(res, 'Failed to load tags'));
   const data = await res.json();
   return data.tags || [];
-}
-
-export type HttpLog = {
-  id: number;
-  ip: string;
-  method: string;
-  path: string;
-  status: number;
-  durationMs: number;
-  headers: Record<string, string>;
-  responseHeaders: Record<string, string>;
-  createdAt: string;
-};
-
-export async function getHttpLogs(limit = 100, offset = 0): Promise<HttpLog[]> {
-  const res = await fetch(`${API}/logs?limit=${limit}&offset=${offset}`);
-  if (!res.ok) throw new Error('Failed to load logs');
-  return res.json();
-}
-
-export async function deleteHttpLogs(): Promise<void> {
-  const res = await fetch(`${API}/logs`, { method: 'DELETE' });
-  if (!res.ok) throw new Error('Failed to delete logs');
 }
 
 export async function deleteTag(

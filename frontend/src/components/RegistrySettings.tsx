@@ -31,10 +31,10 @@ export function RegistrySettings() {
     }
   };
 
-  const handleAdd = async (name: string, hostname: string, port: number, repository: string) => {
+  const handleAdd = async (name: string, hostname: string, port: number) => {
     setError(null);
     try {
-      const r = await addRegistry(name, hostname, port, repository);
+      const r = await addRegistry(name, hostname, port);
       setRegistries((prev) => [...prev, r]);
       setAdding(false);
     } catch (e) {
@@ -43,10 +43,10 @@ export function RegistrySettings() {
     }
   };
 
-  const handleUpdate = async (id: string, name: string, hostname: string, port: number, repository: string) => {
+  const handleUpdate = async (id: string, name: string, hostname: string, port: number) => {
     setError(null);
     try {
-      const r = await updateRegistry(id, name, hostname, port, repository);
+      const r = await updateRegistry(id, name, hostname, port);
       setRegistries((prev) => prev.map((x) => (x.id === id ? r : x)));
       setEditing(null);
     } catch (e) {
@@ -59,7 +59,7 @@ export function RegistrySettings() {
     <div className="space-y-6">
       <h2 className="text-lg font-semibold text-white">Registry settings</h2>
       <p className="text-sm text-surface-400">
-        Add or edit Docker registries by hostname and port. A push uses your existing docker login for that host when one exists. For Oracle Cloud, leave Repository empty. Each image name is the repository, for example fra.ocir.io/tenancy-namespace/webui:V8.0.2-build0046.
+        Add or edit Docker registries by hostname and port. A push uses your existing docker login for that host when one exists. For Oracle Cloud, each image name is the repository, for example fra.ocir.io/tenancy-namespace/webui:V8.0.2-build0046.
       </p>
 
       {error && (
@@ -80,8 +80,7 @@ export function RegistrySettings() {
                     name={r.name}
                     hostname={r.hostname}
                     port={r.port}
-                    repository={r.repository}
-                    onSave={(name, hostname, port, repository) => handleUpdate(r.id, name, hostname, port, repository)}
+                    onSave={(name, hostname, port) => handleUpdate(r.id, name, hostname, port)}
                     onCancel={() => setEditing(null)}
                   />
                 ) : (
@@ -90,7 +89,6 @@ export function RegistrySettings() {
                       <span className="font-medium text-surface-200">{r.name}</span>
                       <span className="ml-2 font-mono text-sm text-surface-500">
                         {r.hostname}:{r.port}
-                        {r.repository ? `/${r.repository}` : ''}
                       </span>
                     </div>
                     <div className="flex gap-2">
@@ -139,21 +137,18 @@ function RegistryForm({
   name: initialName = '',
   hostname: initialHostname = '',
   port: initialPort = 5000,
-  repository: initialRepository = '',
   onSave,
   onCancel,
 }: {
   name?: string;
   hostname?: string;
   port?: number;
-  repository?: string;
-  onSave: (name: string, hostname: string, port: number, repository: string) => Promise<void>;
+  onSave: (name: string, hostname: string, port: number) => Promise<void>;
   onCancel: () => void;
 }) {
   const [name, setName] = useState(initialName);
   const [hostname, setHostname] = useState(initialHostname);
   const [port, setPort] = useState(String(initialPort));
-  const [repository, setRepository] = useState(initialRepository);
   const [saving, setSaving] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -164,7 +159,7 @@ function RegistryForm({
     }
     setSaving(true);
     try {
-      await onSave(name.trim(), hostname.trim(), p, repository.trim());
+      await onSave(name.trim(), hostname.trim(), p);
     } finally {
       setSaving(false);
     }
@@ -198,16 +193,6 @@ function RegistryForm({
           placeholder="registry.example.com"
           className="w-full rounded border border-surface-700 bg-surface-800 px-3 py-2 font-mono text-surface-200"
           required
-        />
-      </div>
-      <div>
-        <label className="mb-1 block text-xs text-surface-500">Repository</label>
-        <input
-          type="text"
-          value={repository}
-          onChange={(e) => setRepository(e.target.value)}
-          placeholder="optional path prefix"
-          className="w-full rounded border border-surface-700 bg-surface-800 px-3 py-2 font-mono text-surface-200"
         />
       </div>
       <div>

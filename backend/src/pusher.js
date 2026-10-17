@@ -6,6 +6,16 @@ import { imageRegistryHost, imageDestination, resolveDockerAuth } from './docker
 
 const docker = new Docker();
 
+export function cancelledError() {
+  const err = new Error('Push cancelled');
+  err.code = 'PUSH_CANCELLED';
+  return err;
+}
+
+export function isCancelledError(err) {
+  return err?.code === 'PUSH_CANCELLED' || /push cancelled/i.test(err?.message || '');
+}
+
 function explainRegistryError(message) {
   if (/\.ocir\.io\//.test(message) && /\b403\b/.test(message)) {
     return `${message} OCIR accepted the login, then denied the upload. This user needs permission to manage repos in the compartment that contains the repository.`;
@@ -13,13 +23,40 @@ function explainRegistryError(message) {
   return message;
 }
 
-function waitForProgress(stream) {
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw cancelledError();
+}
+
+function waitForProgress(stream, signal) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, arg) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      fn(arg);
+    };
+    const onAbort = () => {
+      try {
+        stream.destroy();
+      } catch {
+        /* ignore */
+      }
+      finish(reject, cancelledError());
+    };
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+
     docker.modem.followProgress(stream, (err, output) => {
-      if (err) return reject(err);
+      if (signal?.aborted) return finish(reject, cancelledError());
+      if (err) return finish(reject, err);
       const failed = Array.isArray(output) ? output.find((event) => event && event.error) : null;
-      if (failed) return reject(new Error(explainRegistryError(failed.error)));
-      resolve(output);
+      if (failed) return finish(reject, new Error(explainRegistryError(failed.error)));
+      finish(resolve, output);
     });
   });
 }
@@ -44,20 +81,23 @@ async function removeImage(ref) {
 /**
  * Push a single tar file to selected registries.
  * registryKeys: array of registry IDs
+ * signal: optional AbortSignal to cancel mid-push
  */
-export async function pushTar(filePath, registryKeys, onProgress) {
+export async function pushTar(filePath, registryKeys, onProgress, signal) {
   const startTime = Date.now();
 
   const emit = (stage, progress, message, extra = {}) => {
     onProgress?.({ stage, progress, message, elapsed: Date.now() - startTime, ...extra });
   };
 
+  throwIfAborted(signal);
   emit('parsing', 0, 'Reading manifest...');
   const { component, tag, fullRepoTag, originalRepoTag } = await parseTarManifest(filePath);
   const loadedImageRef = originalRepoTag || `${component}:${tag}`;
 
   const targets = [];
   for (const key of registryKeys) {
+    throwIfAborted(signal);
     const registry = getRegistryById(key);
     if (!registry) throw new Error(`Unknown registry: ${key}`);
     const host = imageRegistryHost(registry);
@@ -73,9 +113,23 @@ export async function pushTar(filePath, registryKeys, onProgress) {
     });
   }
 
+  throwIfAborted(signal);
   emit('loading', 5, 'Loading image into Docker...');
-  const loadStream = await docker.loadImage(fs.createReadStream(filePath));
-  await waitForProgress(loadStream);
+  const fileStream = fs.createReadStream(filePath);
+  const abortFile = () => {
+    try {
+      fileStream.destroy();
+    } catch {
+      /* ignore */
+    }
+  };
+  signal?.addEventListener('abort', abortFile, { once: true });
+  try {
+    const loadStream = await docker.loadImage(fileStream);
+    await waitForProgress(loadStream, signal);
+  } finally {
+    signal?.removeEventListener('abort', abortFile);
+  }
   emit('loading', 20, 'Image loaded');
 
   const total = targets.length;
@@ -85,16 +139,18 @@ export async function pushTar(filePath, registryKeys, onProgress) {
 
   try {
     for (const target of targets) {
+      throwIfAborted(signal);
       emit('tagging', 20 + pushed * progressPerTarget, `Tagging for ${target.name}...`);
       const img = docker.getImage(loadedImageRef);
       await img.tag({ repo: target.remoteRepo, tag: target.tag });
       pushedRefs.push(target.target);
 
+      throwIfAborted(signal);
       const pct = 20 + (pushed + 0.5) * progressPerTarget;
       emit('pushing', pct, `Pushing to ${target.name}...`, { target: target.target });
 
       const pushStream = await docker.getImage(target.target).push({ authconfig: target.authconfig });
-      await waitForProgress(pushStream);
+      await waitForProgress(pushStream, signal);
 
       pushed++;
       emit('pushing', 20 + pushed * progressPerTarget, `Pushed to ${target.name}`);
@@ -107,6 +163,7 @@ export async function pushTar(filePath, registryKeys, onProgress) {
     }
   }
 
+  throwIfAborted(signal);
   emit('done', 100, 'Complete', { component, tag });
   return { component, tag, fullRepoTag };
 }

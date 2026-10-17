@@ -38,32 +38,20 @@ function migrate() {
       error TEXT
     );
 
-    CREATE TABLE IF NOT EXISTS http_logs (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      ip TEXT NOT NULL,
-      method TEXT NOT NULL,
-      path TEXT NOT NULL,
-      status INTEGER NOT NULL,
-      duration_ms INTEGER NOT NULL,
-      headers_json TEXT NOT NULL DEFAULT '{}',
-      response_headers_json TEXT NOT NULL DEFAULT '{}',
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_http_logs_created_at ON http_logs(created_at);
-
     INSERT OR IGNORE INTO scan_cache (id, files_json, last_scanned_at) VALUES (1, '[]', '');
   `);
-  try {
-    db.exec(`ALTER TABLE http_logs ADD COLUMN response_headers_json TEXT NOT NULL DEFAULT '{}'`);
-  } catch {
-    /* column exists */
-  }
   try {
     db.exec(`ALTER TABLE registries ADD COLUMN repository TEXT NOT NULL DEFAULT ''`);
   } catch {
     /* column exists */
   }
+  try {
+    db.exec(`DROP TABLE IF EXISTS http_logs`);
+  } catch {
+    /* ignore */
+  }
+  // Path prefix was removed from settings; clear any leftover values.
+  db.prepare(`UPDATE registries SET repository = '' WHERE repository != ''`).run();
 }
 
 function mapRegistry(r) {
@@ -73,25 +61,24 @@ function mapRegistry(r) {
     name: r.name,
     hostname: r.hostname,
     port: r.port,
-    repository: r.repository || '',
     url: `https://${r.hostname}:${r.port}`,
   };
 }
 
 export function getAllRegistries() {
   const d = init();
-  const rows = d.prepare('SELECT id, name, hostname, port, repository FROM registries ORDER BY name').all();
+  const rows = d.prepare('SELECT id, name, hostname, port FROM registries ORDER BY name').all();
   return rows.map(mapRegistry);
 }
 
 export function getRegistryById(id) {
   const d = init();
-  const r = d.prepare('SELECT id, name, hostname, port, repository FROM registries WHERE id = ?').get(id);
+  const r = d.prepare('SELECT id, name, hostname, port FROM registries WHERE id = ?').get(id);
   if (!r) return null;
   return mapRegistry(r);
 }
 
-export function addRegistry(name, hostname, port, repository = '') {
+export function addRegistry(name, hostname, port) {
   const d = init();
   const id = `reg_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   d.prepare('INSERT INTO registries (id, name, hostname, port, repository) VALUES (?, ?, ?, ?, ?)').run(
@@ -99,16 +86,16 @@ export function addRegistry(name, hostname, port, repository = '') {
     name,
     hostname,
     port,
-    repository || ''
+    ''
   );
   return getRegistryById(id);
 }
 
-export function updateRegistry(id, name, hostname, port, repository = '') {
+export function updateRegistry(id, name, hostname, port) {
   const d = init();
   d.prepare(
     'UPDATE registries SET name = ?, hostname = ?, port = ?, repository = ? WHERE id = ?'
-  ).run(name, hostname, port, repository || '', id);
+  ).run(name, hostname, port, '', id);
   return getRegistryById(id);
 }
 
@@ -138,52 +125,4 @@ export function setScanCache(files, lastScannedAt, error = null) {
   d.prepare(
     'UPDATE scan_cache SET files_json = ?, last_scanned_at = ?, error = ? WHERE id = 1'
   ).run(JSON.stringify(files), lastScannedAt || '', error || null);
-}
-
-// --- HTTP logs ---
-const MAX_HTTP_LOGS = 10_000;
-const HTTP_LOG_RETENTION_DAYS = 7;
-
-export function insertHttpLog(ip, method, path, status, durationMs, headers = {}, responseHeaders = {}) {
-  const d = init();
-  d.prepare(
-    'INSERT INTO http_logs (ip, method, path, status, duration_ms, headers_json, response_headers_json) VALUES (?, ?, ?, ?, ?, ?, ?)'
-  ).run(ip, method, path, status, durationMs, JSON.stringify(headers), JSON.stringify(responseHeaders));
-  pruneHttpLogs(d);
-}
-
-function pruneHttpLogs(d) {
-  const count = d.prepare('SELECT COUNT(*) as n FROM http_logs').get().n;
-  if (count > MAX_HTTP_LOGS) {
-    const toDelete = count - MAX_HTTP_LOGS;
-    d.prepare(
-      'DELETE FROM http_logs WHERE id IN (SELECT id FROM http_logs ORDER BY id LIMIT ?)'
-    ).run(toDelete);
-  }
-  d.prepare(
-    "DELETE FROM http_logs WHERE created_at < datetime('now', ?)"
-  ).run(`-${HTTP_LOG_RETENTION_DAYS} days`);
-}
-
-export function getHttpLogs(limit = 100, offset = 0) {
-  const d = init();
-  const rows = d.prepare(
-    'SELECT id, ip, method, path, status, duration_ms, headers_json, response_headers_json, created_at FROM http_logs ORDER BY id DESC LIMIT ? OFFSET ?'
-  ).all(limit, offset);
-  return rows.map((r) => ({
-    id: r.id,
-    ip: r.ip,
-    method: r.method,
-    path: r.path,
-    status: r.status,
-    durationMs: r.duration_ms,
-    headers: JSON.parse(r.headers_json || '{}'),
-    responseHeaders: JSON.parse(r.response_headers_json || '{}'),
-    createdAt: r.created_at,
-  }));
-}
-
-export function deleteAllHttpLogs() {
-  const d = init();
-  d.prepare('DELETE FROM http_logs').run();
 }

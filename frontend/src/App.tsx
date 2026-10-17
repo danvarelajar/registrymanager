@@ -2,11 +2,10 @@ import { useState, useEffect } from 'react';
 import { FolderView } from './components/FolderView';
 import { RegistryBrowser } from './components/RegistryBrowser';
 import { RegistrySettings } from './components/RegistrySettings';
-import { LogsView } from './components/LogsView';
 import { PushProgress } from './components/PushProgress';
 import { getPushStatus, type PushStatus } from './api';
 
-type Tab = 'folder' | 'registry' | 'settings' | 'logs';
+type Tab = 'folder' | 'registry' | 'settings';
 
 function basename(path: string): string {
   const parts = path.split(/[/\\]/);
@@ -24,7 +23,11 @@ export default function App() {
       try {
         const s = await getPushStatus();
         setPushStatus(s);
-        if (s.status === 'idle' && s.progress?.stage !== 'error') {
+        if (
+          s.status === 'idle' &&
+          s.progress?.stage !== 'error' &&
+          s.progress?.stage !== 'cancelled'
+        ) {
           setShowProgress(false);
         }
       } catch {
@@ -36,7 +39,8 @@ export default function App() {
 
   const isPushing = pushStatus?.status === 'pushing';
   const isError = pushStatus?.status === 'idle' && pushStatus?.progress?.stage === 'error';
-  const showIndicator = isPushing || (isError && !dismissedError);
+  const isCancelled = pushStatus?.status === 'idle' && pushStatus?.progress?.stage === 'cancelled';
+  const showIndicator = isPushing || ((isError || isCancelled) && !dismissedError);
 
   const handlePushStart = () => {
     setDismissedError(false);
@@ -45,7 +49,7 @@ export default function App() {
 
   const handleCloseProgress = () => {
     setShowProgress(false);
-    if (isError) setDismissedError(true);
+    if (isError || isCancelled) setDismissedError(true);
   };
 
   const handleMinimizeProgress = () => {
@@ -69,9 +73,6 @@ export default function App() {
                 <TabButton active={tab === 'settings'} onClick={() => setTab('settings')}>
                   Settings
                 </TabButton>
-                <TabButton active={tab === 'logs'} onClick={() => setTab('logs')}>
-                  Logs
-                </TabButton>
               </nav>
             </div>
             {showIndicator && (
@@ -80,17 +81,23 @@ export default function App() {
                 className={`flex items-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition ${
                   isError
                     ? 'bg-red-500/20 text-red-300 hover:bg-red-500/30'
-                    : 'bg-accent-500/20 text-accent-300 hover:bg-accent-500/30'
+                    : isCancelled
+                      ? 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30'
+                      : 'bg-accent-500/20 text-accent-300 hover:bg-accent-500/30'
                 }`}
               >
                 {isError ? (
                   <>✕ Push failed</>
+                ) : isCancelled ? (
+                  <>Push cancelled</>
                 ) : (
                   <>
                     <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-accent-400" />
-                    {pushStatus?.progress?.queueTotal
-                      ? `Pushing ${(pushStatus.progress.queueIndex ?? 0) + 1}/${pushStatus.progress.queueTotal}`
-                      : 'Pushing…'}
+                    {pushStatus?.progress?.stage === 'cancelling'
+                      ? 'Cancelling…'
+                      : pushStatus?.progress?.queueTotal
+                        ? `Pushing ${(pushStatus.progress.queueIndex ?? 0) + 1}/${pushStatus.progress.queueTotal}`
+                        : 'Pushing…'}
                     {pushStatus?.current && (
                       <span className="max-w-32 truncate font-mono text-surface-400">
                         {basename(pushStatus.current)}
@@ -108,7 +115,6 @@ export default function App() {
         {tab === 'folder' && <FolderView onPushStart={handlePushStart} />}
         {tab === 'registry' && <RegistryBrowser />}
         {tab === 'settings' && <RegistrySettings />}
-        {tab === 'logs' && <LogsView />}
       </main>
 
       {showProgress && (
