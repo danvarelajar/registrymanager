@@ -3,6 +3,7 @@ import path from 'path';
 import { parseTarManifest } from './tar-parser.js';
 import { WATCH_FOLDER } from './config.js';
 import { getScanCache, setScanCache } from './db.js';
+import { logger } from './logger.js';
 
 /**
  * Recursively find all .tar files under dir.
@@ -38,6 +39,7 @@ export async function scanFolder() {
     tarFiles = await findTarFiles(absPath);
   } catch (err) {
     if (err.code === 'ENOENT') {
+      logger.error('scan', `Image folder ${absPath} does not exist`);
       const result = { files: [], lastScannedAt: new Date().toISOString(), error: 'Folder does not exist' };
       setScanCache(result.files, result.lastScannedAt, result.error);
       return result;
@@ -59,6 +61,7 @@ export async function scanFolder() {
         fullRepoTag,
       });
     } catch (err) {
+      logger.warn('scan', `Could not read ${f.folderPath ? `${f.folderPath}/` : ''}${f.filename}`, { filePath: f.filePath, error: err });
       results.push({
         filename: f.filename,
         filePath: f.filePath,
@@ -69,6 +72,10 @@ export async function scanFolder() {
   }
 
   const lastScannedAt = new Date().toISOString();
+  const failed = results.filter((r) => r.error).length;
+  logger.info('scan', `Scanned ${absPath}: ${results.length} tar file(s)${failed ? `, ${failed} unreadable` : ''}`, {
+    folders: [...new Set(results.map((r) => r.folderPath || '.'))],
+  });
   setScanCache(results, lastScannedAt, null);
   return { files: results, lastScannedAt };
 }

@@ -10,10 +10,12 @@ export function PushProgress({
   status,
   onClose,
   onMinimize,
+  onOpenLogs,
 }: {
   status: PushStatus | null;
   onClose: () => void;
   onMinimize: () => void;
+  onOpenLogs: () => void;
 }) {
   const p = status?.progress;
   const isError = p?.stage === 'error';
@@ -114,7 +116,13 @@ export function PushProgress({
             </ul>
           </div>
         )}
-        {isError && <p className="mt-3 text-sm text-red-400">{p?.message}</p>}
+        {isError && <p className="mt-3 break-words text-sm text-red-400">{p?.message}</p>}
+        {isError && p?.hint && <p className="mt-2 text-sm text-amber-200">{p.hint}</p>}
+        {isError && isQueue && (
+          <p className="mt-2 text-sm text-slate-400">
+            Stopped at image {queueIndex + 1} of {queueTotal}; the remaining images were not pushed.
+          </p>
+        )}
         {isCancelled && (
           <p className="mt-3 text-sm text-amber-300">
             Push stopped. Images already uploaded stay in the registry; local Docker images were cleaned up.
@@ -138,6 +146,14 @@ export function PushProgress({
                 Minimize
               </button>
             </>
+          )}
+          {(isError || isCancelled) && (
+            <button
+              onClick={onOpenLogs}
+              className="rounded-lg bg-surface-800 px-4 py-2 text-sm font-medium text-surface-200 hover:bg-slate-700"
+            >
+              View logs
+            </button>
           )}
           {!isPushing && (
             <button

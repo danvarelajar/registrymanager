@@ -3,9 +3,10 @@ import { FolderView } from './components/FolderView';
 import { RegistryBrowser } from './components/RegistryBrowser';
 import { RegistrySettings } from './components/RegistrySettings';
 import { PushProgress } from './components/PushProgress';
+import { LogsView } from './components/LogsView';
 import { getPushStatus, type PushStatus } from './api';
 
-type Tab = 'folder' | 'registry' | 'settings';
+type Tab = 'folder' | 'registry' | 'logs' | 'settings';
 
 function basename(path: string): string {
   const parts = path.split(/[/\\]/);
@@ -70,6 +71,9 @@ export default function App() {
                 <TabButton active={tab === 'registry'} onClick={() => setTab('registry')}>
                   Registry Browser
                 </TabButton>
+                <TabButton active={tab === 'logs'} onClick={() => setTab('logs')}>
+                  Logs
+                </TabButton>
                 <TabButton active={tab === 'settings'} onClick={() => setTab('settings')}>
                   Settings
                 </TabButton>
@@ -114,6 +118,7 @@ export default function App() {
       <main className="mx-auto max-w-7xl px-6 py-8">
         {tab === 'folder' && <FolderView onPushStart={handlePushStart} />}
         {tab === 'registry' && <RegistryBrowser />}
+        {tab === 'logs' && <LogsView />}
         {tab === 'settings' && <RegistrySettings />}
       </main>
 
@@ -122,6 +127,10 @@ export default function App() {
           status={pushStatus}
           onClose={handleCloseProgress}
           onMinimize={handleMinimizeProgress}
+          onOpenLogs={() => {
+            handleCloseProgress();
+            setTab('logs');
+          }}
         />
       )}
     </div>

@@ -9,7 +9,9 @@ import { scanFolder, getLastScannedAt } from './scanner.js';
 import { pushTar, isCancelledError } from './pusher.js';
 import * as registry from './registry.js';
 import * as db from './db.js';
-import { imageDestination, isOcirHost, resolveDockerAuth } from './docker-auth.js';
+import { imageDestination, isOcirHost, resolveDockerAuth, dockerConfigPath } from './docker-auth.js';
+import { logger, hintFor } from './logger.js';
+import { runDiagnostics } from './diagnostics.js';
 import { WATCH_FOLDER, PORT } from './config.js';
 
 const app = express();
@@ -62,6 +64,7 @@ app.post('/api/registries', (req, res) => {
   }
   try {
     const r = db.addRegistry(String(name).trim(), String(hostname).trim(), p);
+    logger.info('settings', `Added registry ${r.name} (${r.hostname}:${r.port})`, { registry: r.name });
     res.status(201).json(r);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -83,6 +86,7 @@ app.put('/api/registries/:id', (req, res) => {
   }
   try {
     const r = db.updateRegistry(id, String(name).trim(), String(hostname).trim(), p);
+    logger.info('settings', `Updated registry ${r.name} (${r.hostname}:${r.port})`, { registry: r.name });
     res.json(r);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -91,10 +95,12 @@ app.put('/api/registries/:id', (req, res) => {
 
 app.delete('/api/registries/:id', (req, res) => {
   const { id } = req.params;
-  if (!db.getRegistryById(id)) {
+  const existing = db.getRegistryById(id);
+  if (!existing) {
     return res.status(404).json({ error: 'Registry not found' });
   }
   db.deleteRegistry(id);
+  logger.info('settings', `Deleted registry ${existing.name} (${existing.hostname}:${existing.port})`);
   res.json({ deleted: true });
 });
 
@@ -159,6 +165,7 @@ app.post('/api/push', async (req, res) => {
   pushState.progress = null;
 
   res.json({ accepted: true });
+  logger.info('push', `Push requested for ${path.basename(filePath)}`, { registries: registryNames(registries) });
 
   try {
     await pushTar(filePath, registries, (p) => {
@@ -167,9 +174,10 @@ app.post('/api/push', async (req, res) => {
     endPush(null);
   } catch (err) {
     if (isCancelledError(err)) {
+      logger.warn('push', 'Push cancelled');
       endPush({ stage: 'cancelled', message: 'Push cancelled', progress: 0, elapsed: pushState.progress?.elapsed });
     } else {
-      endPush({ stage: 'error', message: err.message });
+      endPush({ stage: 'error', message: err.message, hint: hintFor(err.message) });
     }
   }
 });
@@ -190,9 +198,15 @@ app.post('/api/push/queue', async (req, res) => {
   pushState.progress = null;
 
   res.json({ accepted: true });
+  const queueStart = Date.now();
+  logger.info('push', `Queue started: ${items.length} image(s)`, {
+    files: items.map((i) => path.basename(i.filePath)),
+    registries: registryNames([...new Set(items.flatMap((i) => i.registries || []))]),
+  });
 
   (async () => {
     let outcome = null;
+    let done = 0;
     for (let i = 0; i < items.length; i++) {
       if (signal.aborted) {
         outcome = { stage: 'cancelled', message: 'Push cancelled', queueIndex: i, queueTotal: items.length, progress: 0 };
@@ -204,6 +218,7 @@ app.post('/api/push/queue', async (req, res) => {
         await pushTar(filePath, registries, (p) => {
           pushState.progress = { ...p, queueIndex: i, queueTotal: items.length };
         }, signal);
+        done++;
       } catch (err) {
         if (isCancelledError(err)) {
           outcome = {
@@ -215,10 +230,26 @@ app.post('/api/push/queue', async (req, res) => {
             elapsed: pushState.progress?.elapsed,
           };
         } else {
-          outcome = { stage: 'error', message: err.message, queueIndex: i, queueTotal: items.length };
+          outcome = {
+            stage: 'error',
+            message: err.message,
+            hint: hintFor(err.message),
+            queueIndex: i,
+            queueTotal: items.length,
+          };
         }
         break;
       }
+    }
+    const took = `${((Date.now() - queueStart) / 1000).toFixed(1)}s`;
+    if (!outcome) {
+      logger.info('push', `Queue finished: ${done}/${items.length} pushed in ${took}`);
+    } else if (outcome.stage === 'cancelled') {
+      logger.warn('push', `Queue cancelled after ${done}/${items.length} in ${took}`);
+    } else {
+      logger.error('push', `Queue stopped at ${path.basename(items[outcome.queueIndex].filePath)} after ${done}/${items.length} pushed in ${took}; remaining images were not pushed`, {
+        error: new Error(outcome.message),
+      });
     }
     endPush(outcome);
   })();
@@ -234,6 +265,7 @@ app.post('/api/push/cancel', (req, res) => {
     stage: 'cancelling',
     message: 'Cancelling…',
   };
+  logger.warn('push', 'Cancel requested', { current: pushState.current ? path.basename(pushState.current) : undefined });
   pushAbort?.abort();
   res.json({ accepted: true });
 });
@@ -292,6 +324,7 @@ app.post('/api/registry/check', async (req, res) => {
     // registries are reachable. Keep a small pool so presence scans stay reliable.
     const concurrency = Number(process.env.REGISTRY_CHECK_CONCURRENCY) || 4;
     const tagCache = new Map();
+    const failures = new Map();
     await mapLimit(jobs, concurrency, async ({ image, registry: r }) => {
       const fullRepoTag = `${image.component}:${image.tag}`;
       try {
@@ -309,10 +342,20 @@ app.post('/api/registry/check', async (req, res) => {
         const missing = /Tags list failed: 404/.test(err.message || '')
           || (isOcirHost(r.hostname) && /Tags list failed: 403/.test(err.message || ''));
         if (!missing) {
-          console.warn(`Presence check failed for ${r.hostname}/${image.component}: ${err.message}`);
+          const f = failures.get(r.id) || { registry: r, count: 0, images: [], error: err };
+          f.count++;
+          if (f.images.length < 10) f.images.push(fullRepoTag);
+          failures.set(r.id, f);
         }
       }
     });
+    for (const { registry: r, count, images: failedImages, error } of failures.values()) {
+      logger.warn('registry', `Presence check failed for ${count} image(s) on ${r.name} (${r.hostname}:${r.port})`, {
+        registry: r.name,
+        images: failedImages,
+        error,
+      });
+    }
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -325,6 +368,7 @@ app.get('/api/registry/:key/catalog', async (req, res) => {
     const repos = await registry.getCatalog(req.params.key);
     res.json({ repositories: repos });
   } catch (err) {
+    logger.warn('registry', `Catalog request failed for ${registryLabel(req.params.key)}`, { error: err });
     res.status(500).json({ error: err.message });
   }
 });
@@ -336,6 +380,7 @@ app.get('/api/registry/:key/tags', async (req, res) => {
     const tags = await registry.getTags(req.params.key, repo);
     res.json({ tags });
   } catch (err) {
+    logger.warn('registry', `Tag list failed for ${repo} on ${registryLabel(req.params.key)}`, { error: err });
     res.status(500).json({ error: err.message });
   }
 });
@@ -360,8 +405,10 @@ app.delete('/api/registry/:key/manifests', async (req, res) => {
   if (!repo || !tag) return res.status(400).json({ error: 'repository and tag required' });
   try {
     await deleteTag(req.params.key, repo, tag);
+    logger.info('registry', `Deleted ${repo}:${tag} on ${registryLabel(req.params.key)}`);
     res.json({ deleted: true });
   } catch (err) {
+    logger.error('registry', `Deleting ${repo}:${tag} on ${registryLabel(req.params.key)} failed`, { error: err });
     res.status(500).json({ error: err.message });
   }
 });
@@ -374,6 +421,54 @@ app.delete('/api/registry/:key/manifests/:repo/:tag', async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// --- Logs & diagnostics ---
+app.get('/api/logs', (req, res) => {
+  const { level, category, q, limit, afterId, beforeId } = req.query;
+  res.json({
+    logs: db.getLogs({ minLevel: level, category, q, limit, afterId, beforeId }),
+    categories: db.getLogCategories(),
+  });
+});
+
+app.get('/api/logs/export', (req, res) => {
+  const { level, category, q } = req.query;
+  const rows = db.getLogs({ minLevel: level, category, q, limit: 5000 }).reverse();
+  const text = rows
+    .map((r) => {
+      const ctx = Object.keys(r.context || {}).length ? ` ${JSON.stringify(r.context)}` : '';
+      return `${r.ts} ${r.level.toUpperCase().padEnd(5)} [${r.category}] ${r.message}${ctx}`;
+    })
+    .join('\n');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="fs-repo-manager-${stamp}.log"`);
+  res.send(text + '\n');
+});
+
+app.delete('/api/logs', (req, res) => {
+  db.clearLogs();
+  logger.info('system', 'Logs cleared');
+  res.json({ cleared: true });
+});
+
+app.post('/api/diagnostics', async (req, res) => {
+  try {
+    res.json(await runDiagnostics());
+  } catch (err) {
+    logger.error('diagnostics', 'Diagnostics failed to run', { error: err });
+    res.status(500).json({ error: err.message });
+  }
+});
+
+function registryLabel(id) {
+  const r = db.getRegistryById(id);
+  return r ? `${r.name} (${r.hostname}:${r.port})` : id;
+}
+
+function registryNames(ids = []) {
+  return ids.map((id) => db.getRegistryById(id)?.name || id);
+}
 
 // --- Static frontend (production) ---
 const publicPath = path.join(__dirname, '..', '..', 'public');
@@ -388,4 +483,11 @@ if (existsSync(publicPath)) {
 // Start
 app.listen(PORT, () => {
   console.log(`Backend running at http://localhost:${PORT}`);
+  logger.info('system', 'Server started', {
+    port: Number(PORT),
+    watchFolder: path.resolve(WATCH_FOLDER),
+    dockerConfig: dockerConfigPath(),
+    insecureTls: process.env.REGISTRY_INSECURE_TLS === '1' || process.env.REGISTRY_INSECURE_TLS === 'true',
+    registries: db.getAllRegistries().map((r) => `${r.name} (${r.hostname}:${r.port})`),
+  });
 });
