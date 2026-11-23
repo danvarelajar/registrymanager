@@ -14,9 +14,18 @@ const REGISTRY_HEADERS = {
 };
 
 const INSECURE_TLS = process.env.REGISTRY_INSECURE_TLS === '1' || process.env.REGISTRY_INSECURE_TLS === 'true';
-const httpsOpts = { rejectUnauthorized: !INSECURE_TLS };
+
+// Keep connections open and cap how many are opened per host. Docker Desktop delays bursts of new
+// outbound connections by 1-2s each, so opening a fresh TLS connection per request caused timeouts.
+const MAX_SOCKETS_PER_HOST = Number(process.env.REGISTRY_MAX_SOCKETS) || 4;
+const agentOpts = { keepAlive: true, keepAliveMsecs: 15000, maxSockets: MAX_SOCKETS_PER_HOST, maxFreeSockets: MAX_SOCKETS_PER_HOST };
+const httpsAgent = new https.Agent({ ...agentOpts, rejectUnauthorized: !INSECURE_TLS });
+const httpAgent = new http.Agent(agentOpts);
 
 const tokenCache = new Map();
+// Last auth challenge seen per registry, so later requests can send credentials up front
+// instead of first collecting a 401.
+const challengeCache = new Map();
 
 function registryBase(registryKey) {
   const r = getRegistryById(registryKey);
@@ -44,9 +53,10 @@ export function parseWwwAuthenticate(header) {
   return { scheme, ...params };
 }
 
-const REQUEST_TIMEOUT_MS = Number(process.env.REGISTRY_REQUEST_TIMEOUT_MS) || 10000;
+const REQUEST_TIMEOUT_MS = Number(process.env.REGISTRY_REQUEST_TIMEOUT_MS) || 15000;
+const RETRYABLE = new Set(['ETIMEDOUT', 'ECONNRESET', 'ECONNREFUSED', 'EPIPE', 'EAI_AGAIN']);
 
-function rawFetch(url, options = {}) {
+function rawFetchOnce(url, options = {}) {
   const u = new URL(url);
   const lib = u.protocol === 'http:' ? http : https;
   const opts = {
@@ -55,11 +65,14 @@ function rawFetch(url, options = {}) {
     path: u.pathname + u.search,
     method: options.method || 'GET',
     headers: { ...REGISTRY_HEADERS, ...options.headers },
-    timeout: options.timeout ?? REQUEST_TIMEOUT_MS,
-    ...(lib === https ? httpsOpts : {}),
+    agent: lib === https ? httpsAgent : httpAgent,
   };
+  const timeoutMs = options.timeout ?? REQUEST_TIMEOUT_MS;
   return new Promise((resolve, reject) => {
+    let connected = false;
+    let timer;
     const req = lib.request(opts, (res) => {
+      clearTimeout(timer);
       let body = '';
       res.on('data', (c) => (body += c));
       res.on('end', () => {
@@ -73,13 +86,37 @@ function rawFetch(url, options = {}) {
         });
       });
     });
-    req.on('timeout', () => {
-      req.destroy();
-      reject(Object.assign(new Error(`connect ETIMEDOUT ${opts.hostname}:${opts.port}`), { code: 'ETIMEDOUT' }));
+    req.on('socket', (socket) => {
+      // A reused keep-alive socket is already connected.
+      if (!socket.connecting) connected = true;
+      else socket.once(lib === https ? 'secureConnect' : 'connect', () => (connected = true));
     });
-    req.on('error', reject);
+    // One deadline for the whole request, including time spent waiting for a free socket.
+    timer = setTimeout(() => {
+      const what = connected
+        ? `${opts.method} ${u.pathname} on ${opts.hostname}:${opts.port}: no response within ${timeoutMs / 1000}s`
+        : `connect ETIMEDOUT ${opts.hostname}:${opts.port} (no connection within ${timeoutMs / 1000}s)`;
+      req.destroy(Object.assign(new Error(what), { code: 'ETIMEDOUT' }));
+    }, timeoutMs);
+    req.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
     req.end();
   });
+}
+
+/** Read-only requests are retried once on network errors; DELETE is not. */
+async function rawFetch(url, options = {}) {
+  const method = options.method || 'GET';
+  try {
+    return await rawFetchOnce(url, options);
+  } catch (err) {
+    if (method !== 'GET' && method !== 'HEAD') throw err;
+    if (!RETRYABLE.has(err.code)) throw err;
+    await new Promise((r) => setTimeout(r, 500));
+    return rawFetchOnce(url, options);
+  }
 }
 
 async function requestToken(challenge, auth, scope) {
@@ -125,26 +162,43 @@ async function getBearerToken(challenge, auth, scope) {
   }
 }
 
+async function authHeader(challenge, auth, scope) {
+  if (challenge?.scheme === 'bearer' && challenge.realm) {
+    // The cached challenge carries another request's scope; use this request's own.
+    const token = await getBearerToken({ ...challenge, scope: undefined }, auth, scope);
+    return `Bearer ${token}`;
+  }
+  return `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;
+}
+
 async function authorizedFetch(registryKey, urlPath, options = {}) {
   const base = registryBase(registryKey);
   if (!base) throw new Error('Unknown registry');
   const url = `https://${base}${urlPath}`;
-  const first = await rawFetch(url, options);
-  if (first.status !== 401) return first;
-
   const registry = getRegistryById(registryKey);
-  if (!registry) return first;
-  const auth = await resolveDockerAuth(registry.hostname, registry.port);
-  if (!auth?.username || !auth.password) return first;
+  const auth = registry ? await resolveDockerAuth(registry.hostname, registry.port) : null;
+  const hasAuth = Boolean(auth?.username && auth.password);
+
+  // Known challenge: send credentials straight away and skip the 401 round trip.
+  const cached = challengeCache.get(base);
+  if (cached && hasAuth) {
+    const headers = { ...(options.headers || {}), Authorization: await authHeader(cached, auth, options.scope) };
+    const res = await rawFetch(url, { ...options, headers });
+    if (res.status !== 401) return res;
+    challengeCache.delete(base);
+  }
+
+  const first = await rawFetch(url, options);
+  if (first.status !== 401 || !hasAuth) return first;
 
   const challenge = parseWwwAuthenticate(headerValue(first.headers, 'www-authenticate'));
-  const headers = { ...(options.headers || {}) };
-  if (challenge?.scheme === 'bearer' && challenge.realm) {
-    const token = await getBearerToken(challenge, auth, options.scope);
-    headers.Authorization = `Bearer ${token}`;
-  } else {
-    headers.Authorization = `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;
-  }
+  if (challenge) challengeCache.set(base, challenge);
+  const headers = {
+    ...(options.headers || {}),
+    Authorization: challenge?.scheme === 'bearer' && challenge.realm
+      ? `Bearer ${await getBearerToken(challenge, auth, options.scope)}`
+      : await authHeader(challenge, auth, options.scope),
+  };
   return rawFetch(url, { ...options, headers });
 }
 

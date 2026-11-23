@@ -306,56 +306,66 @@ app.post('/api/registry/check', async (req, res) => {
       ? registryIds.map((id) => db.getRegistryById(id)).filter(Boolean)
       : db.getAllRegistries();
 
-    const jobs = [];
-    for (const image of images) {
-      if (!image?.component || !image?.tag) continue;
-      for (const r of registries) {
-        jobs.push({ image, registry: r });
-      }
-    }
-
     const result = {};
     for (const { component, tag } of images) {
       if (!component || !tag) continue;
       result[`${component}:${tag}`] = Object.fromEntries(registries.map((r) => [r.id, false]));
     }
+    const validImages = images.filter((image) => image?.component && image?.tag);
 
-    // Unbounded parallel checks open too many sockets and time out even when the
-    // registries are reachable. Keep a small pool so presence scans stay reliable.
+    // Each registry gets its own small pool, so one slow registry cannot hold up another.
+    // Connections are reused (see registry.js), which keeps Docker Desktop from throttling bursts.
     const concurrency = Number(process.env.REGISTRY_CHECK_CONCURRENCY) || 4;
-    const tagCache = new Map();
-    const failures = new Map();
-    await mapLimit(jobs, concurrency, async ({ image, registry: r }) => {
-      const fullRepoTag = `${image.component}:${image.tag}`;
-      try {
-        const auth = await resolveDockerAuth(r.hostname, r.port);
-        const dest = imageDestination(r, image.component, image.tag, auth);
-        const cacheKey = `${r.id}\n${dest.repository}`;
-        let tags = tagCache.get(cacheKey);
-        if (!tags) {
-          tags = await registry.getTags(r.id, dest.repository);
-          tagCache.set(cacheKey, tags);
+    const CONNECT_FAILURE = /connect ETIMEDOUT|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH/;
+
+    await Promise.all(registries.map(async (r) => {
+      const tagCache = new Map();
+      const failure = { count: 0, images: [], error: null };
+      let unreachable = null;
+      let skipped = 0;
+
+      await mapLimit(validImages, concurrency, async (image) => {
+        const fullRepoTag = `${image.component}:${image.tag}`;
+        if (unreachable) {
+          skipped++;
+          return;
         }
-        result[fullRepoTag][r.id] = tags.includes(dest.tag);
-      } catch (err) {
-        result[fullRepoTag][r.id] = false;
-        const missing = /Tags list failed: 404/.test(err.message || '')
-          || (isOcirHost(r.hostname) && /Tags list failed: 403/.test(err.message || ''));
-        if (!missing) {
-          const f = failures.get(r.id) || { registry: r, count: 0, images: [], error: err };
-          f.count++;
-          if (f.images.length < 10) f.images.push(fullRepoTag);
-          failures.set(r.id, f);
+        try {
+          const auth = await resolveDockerAuth(r.hostname, r.port);
+          const dest = imageDestination(r, image.component, image.tag, auth);
+          let tags = tagCache.get(dest.repository);
+          if (!tags) {
+            tags = registry.getTags(r.id, dest.repository);
+            tagCache.set(dest.repository, tags);
+          }
+          result[fullRepoTag][r.id] = (await tags).includes(dest.tag);
+        } catch (err) {
+          const msg = err.message || '';
+          const missing = /Tags list failed: 404/.test(msg)
+            || (isOcirHost(r.hostname) && /Tags list failed: 403/.test(msg));
+          if (missing) return;
+          if (CONNECT_FAILURE.test(msg) || CONNECT_FAILURE.test(err.code || '')) unreachable = err;
+          failure.count++;
+          if (failure.images.length < 10) failure.images.push(fullRepoTag);
+          failure.error = failure.error || err;
         }
-      }
-    });
-    for (const { registry: r, count, images: failedImages, error } of failures.values()) {
-      logger.warn('registry', `Presence check failed for ${count} image(s) on ${r.name} (${r.hostname}:${r.port})`, {
-        registry: r.name,
-        images: failedImages,
-        error,
       });
-    }
+
+      if (unreachable) {
+        logger.warn('registry', `${r.name} (${r.hostname}:${r.port}) is unreachable; skipped the remaining ${skipped} image(s) in this check`, {
+          registry: r.name,
+          failed: failure.count,
+          skipped,
+          error: unreachable,
+        });
+      } else if (failure.count) {
+        logger.warn('registry', `Presence check failed for ${failure.count} image(s) on ${r.name} (${r.hostname}:${r.port})`, {
+          registry: r.name,
+          images: failure.images,
+          error: failure.error,
+        });
+      }
+    }));
     res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
