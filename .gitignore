@@ -8,3 +8,9 @@ dist/
 .app.log
 data/*
 !data/.gitkeep
+
+# Image tars, Helm charts and build folders are local data, never committed
+images/*
+!images/.gitkeep
+*.tgz
+*.tar.gz
